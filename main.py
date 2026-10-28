@@ -116,30 +116,64 @@ Return ONLY JSON in this shape:
  "character_look": "one fixed visual description of the main character (age, hair, clothes) reused in every scene so they look the same; keep the face often in shadow",
  "scenes": [ {{"narration": "text read aloud", "visual": "what the picture shows, no text in picture, nothing gory"}} ]
 }}"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": os.environ["GEMINI_API_KEY"], "Content-Type": "application/json"}
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 1.1, "responseMimeType": "application/json"},
     }
     last = None
-    for attempt in range(4):
-        try:
-            r = requests.post(url, headers=headers, json=body, timeout=90)
-            r.raise_for_status()
-            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            data = json.loads(text)
-            if isinstance(data, list):
-                data = data[0]
-            assert len(data["scenes"]) >= 4
-            for s in data["scenes"]:
-                assert s["narration"].strip() and s["visual"].strip()
-            return data
-        except Exception as e:  # noqa
-            last = e
-            print("story attempt failed:", e)
-            time.sleep(5 * (attempt + 1))
+    for model in candidate_models(headers):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        print("trying model:", model)
+        for attempt in range(3):
+            try:
+                r = requests.post(url, headers=headers, json=body, timeout=120)
+                if r.status_code in (404, 400, 403):
+                    print("model not usable:", r.status_code, r.text[:300])
+                    last = f"{model}: {r.status_code}"
+                    break  # try the next model
+                r.raise_for_status()
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                data = json.loads(text)
+                if isinstance(data, list):
+                    data = data[0]
+                assert len(data["scenes"]) >= 4
+                for s in data["scenes"]:
+                    assert s["narration"].strip() and s["visual"].strip()
+                return data
+            except Exception as e:  # noqa
+                last = e
+                print("story attempt failed:", e)
+                time.sleep(5 * (attempt + 1))
     raise RuntimeError(f"could not get a story: {last}")
+
+
+def candidate_models(headers):
+    """Ask Google which models this key can use; return the best text models first."""
+    names = []
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+                         headers=headers, timeout=60)
+        print("model list status:", r.status_code)
+        if r.status_code == 200:
+            for m in r.json().get("models", []):
+                if "generateContent" in m.get("supportedGenerationMethods", []):
+                    names.append(m["name"].replace("models/", ""))
+        else:
+            print(r.text[:300])
+    except Exception as e:  # noqa
+        print("could not list models:", e)
+    print("available text models:", names)
+    skip = ("image", "tts", "live", "audio", "embedding", "robotics", "computer", "learnlm", "gemma")
+    usable = [n for n in names if n.startswith("gemini") and not any(s in n for s in skip)]
+    preferred = [GEMINI_MODEL, "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash",
+                 "gemini-flash-lite-latest", "gemini-2.5-flash-lite"]
+    ordered = [p for p in preferred if p in usable]
+    ordered += [n for n in usable if "flash" in n and n not in ordered]
+    ordered += [n for n in usable if n not in ordered]
+    if not ordered:  # list failed: just try the common names
+        ordered = preferred
+    return ordered[:6]
 
 
 # ---------------------------------------------------------------- voice
